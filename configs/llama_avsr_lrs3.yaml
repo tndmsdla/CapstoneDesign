@@ -1,0 +1,16 @@
+# llama_avsr_lrs3.yaml (기본 추론 설정)
+model:
+  name: llama-avsr
+  encoder_type: av_hubert
+  pretrained_avhubert: ./av_hubert/checkpoints/avhubert_base.pt
+  decoder_type: llama
+  max_tokens: 4096
+
+dataset:
+  video_fps: 25
+  audio_rate: 16000
+  text_lang: en
+
+beam_search:
+  beam_size: 5
+  length_penalty: 0.6
