@@ -95,7 +95,7 @@ def load_model_from_checkpoint(checkpoint_path, args):
     로그 최소화 + 스마트 키 매칭 + OOM 방지 로드
     """
     print("LLM & 체크포인트 로딩 시작")
-    print_memory_usage("Init Start")
+    # print_memory_usage("Init Start")
 
     # 1. lightning.py 자동 로딩 방지
     temp_path_backup = getattr(args, 'pretrained_model_path', None)
@@ -132,7 +132,7 @@ def load_model_from_checkpoint(checkpoint_path, args):
     # 5. 모델 뼈대 생성 (여기서 로그가 좀 나올 수 있음 - 라이브러리 자체 로그)
     modelmodule = ModelModule_LLM(args)
     args.pretrained_model_path = temp_path_backup
-    print_memory_usage("Skeleton Built")
+    # print_memory_usage("Skeleton Built")
 
     # 6. 가중치 로드 (스마트 키 매칭)
     if isinstance(ckpt, dict) and 'state_dict' in ckpt:
@@ -200,7 +200,7 @@ def load_model_from_checkpoint(checkpoint_path, args):
         torch.cuda.empty_cache()
 
     print("LLM & 체크포인트 로딩 완료")
-    print_memory_usage("Ready to Infer")
+    # print_memory_usage("Ready to Infer")
     return modelmodule
 
 
