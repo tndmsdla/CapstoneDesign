@@ -19,7 +19,33 @@ llm_size = {"TinyLlama/TinyLlama_v1.1": 2048,
             "meta-llama/Llama-2-13b-hf": 5120,
             "meta-llama/Llama-2-7b-hf": 4096,
             "meta-llama/Meta-Llama-3.1-8B": 4096,
+            # 로컬 경로 패턴 (일반적인 경로들)
+            "models/Meta-Llama-3.1-8B": 4096,
+            "models/TinyLlama_v1.1": 2048,
             }
+
+def get_llm_hidden_size(llm_model_path):
+    """LLM 모델 경로에서 hidden_size를 가져옵니다."""
+    # 정확한 경로 매칭 시도
+    if llm_model_path in llm_size:
+        return llm_size[llm_model_path]
+    
+    # 경로에서 모델 이름 추출하여 매칭 시도
+    llm_model_lower = llm_model_path.lower()
+    if "tinyllama" in llm_model_lower:
+        return 2048
+    elif "llama-2-13b" in llm_model_lower or "llama-2-13b-hf" in llm_model_lower:
+        return 5120
+    elif "llama-2-7b" in llm_model_lower or "llama-2-7b-hf" in llm_model_lower:
+        return 4096
+    elif "llama-3.1-8b" in llm_model_lower or "meta-llama-3.1-8b" in llm_model_lower:
+        return 4096
+    elif "llama-3" in llm_model_lower:
+        return 4096  # 기본값
+    
+    # 기본값 반환 (TinyLlama 크기)
+    print(f"⚠️  경고: '{llm_model_path}'에 대한 hidden_size를 찾을 수 없어 기본값 2048을 사용합니다.")
+    return 2048
 
 
 def compute_word_level_distance(seq1, seq2):
@@ -40,7 +66,11 @@ class ModelModule_LLM(LightningModule):
         # Apparently, some LLMs don't rely on FastTokenizer and it seems like they don't append the EOS token even though you set
         # it explicitly. In my case, this happens for LLama3. More details at: https://github.com/huggingface/transformers/issues/22794.
         
-        if args.llm_model == "meta-llama/Meta-Llama-3.1-8B":
+        # Llama3 모델 체크 (경로도 고려)
+        is_llama3 = (args.llm_model == "meta-llama/Meta-Llama-3.1-8B" or 
+                     "Meta-Llama-3.1-8B" in args.llm_model or 
+                     "llama-3.1-8b" in args.llm_model.lower())
+        if is_llama3:
             bos = self.tokenizer.bos_token
             eos = self.tokenizer.eos_token
             
@@ -75,8 +105,11 @@ class ModelModule_LLM(LightningModule):
         
         if args.add_PETF_LLM:
             
-            IS_LLAMA3 = True if args.llm_model == "meta-llama/Meta-Llama-3.1-8B" else False
-            IS_TINYLLAMA = True if args.llm_model == "TinyLlama/TinyLlama_v1.1" else False
+            # Llama3 모델 체크 (경로도 고려)
+            IS_LLAMA3 = (args.llm_model == "meta-llama/Meta-Llama-3.1-8B" or 
+                         "Meta-Llama-3.1-8B" in args.llm_model or 
+                         "llama-3.1-8b" in args.llm_model.lower())
+            IS_TINYLLAMA = True if "TinyLlama" in args.llm_model or "tinyllama" in args.llm_model.lower() else False
             lora_config_llm = LoRA_config(args.reduction_lora, args.alpha, IS_LLAMA3, IS_TINYLLAMA)
             
             self.model = AVSR_LLMs(modality = args.modality,  
@@ -85,7 +118,7 @@ class ModelModule_LLM(LightningModule):
                                    pretrain_avhubert_enc_audiovisual = args.pretrain_avhubert_enc_audiovisual_path,
                                    use_lora_avhubert= args.use_lora_avhubert,
                                    llm_model = args.llm_model, 
-                                   hidden_size = llm_size[args.llm_model], 
+                                   hidden_size = get_llm_hidden_size(args.llm_model), 
                                    intermediate_size= args.intermediate_size, 
                                    tokenizer = self.tokenizer, 
                                    prompt = prompt, 
@@ -99,7 +132,10 @@ class ModelModule_LLM(LightningModule):
                                    max_dec_tokens = args.max_dec_tokens, 
                                    num_beams = args.num_beams, 
                                    PETF_LLM_name = args.add_PETF_LLM, 
-                                   peft_config_llm= lora_config_llm, 
+                                   peft_config_llm= lora_config_llm,
+                                   use_uadf = getattr(args, 'use_uadf', False),
+                                   uadf_fusion_method = getattr(args, 'uadf_fusion_method', 'uncertainty'),
+                                   uadf_temperature = getattr(args, 'uadf_temperature', 1.0),
                                    )
             
             n_parameters_learn = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
@@ -112,7 +148,7 @@ class ModelModule_LLM(LightningModule):
                                    pretrain_avhubert_enc_audiovisual = args.pretrain_avhubert_enc_audiovisual_path,
                                    use_lora_avhubert= args.use_lora_avhubert,
                                    llm_model = args.llm_model,
-                                   hidden_size = llm_size[args.llm_model],
+                                   hidden_size = get_llm_hidden_size(args.llm_model),
                                    intermediate_size= args.intermediate_size,
                                    tokenizer = self.tokenizer,
                                    prompt = prompt,
@@ -124,7 +160,10 @@ class ModelModule_LLM(LightningModule):
                                    audio_encoder_name = args.audio_encoder_name,
                                    unfrozen_modules= args.unfrozen_modules,
                                    max_dec_tokens = args.max_dec_tokens,
-                                   num_beams = args.num_beams, 
+                                   num_beams = args.num_beams,
+                                   use_uadf = getattr(args, 'use_uadf', False),
+                                   uadf_fusion_method = getattr(args, 'uadf_fusion_method', 'uncertainty'),
+                                   uadf_temperature = getattr(args, 'uadf_temperature', 1.0),
                                    )
             
             n_parameters_learn = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
