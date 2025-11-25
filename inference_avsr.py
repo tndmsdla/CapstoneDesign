@@ -202,13 +202,12 @@ def load_model_from_checkpoint(checkpoint_path, args):
     print("LLM & 체크포인트 로딩 완료")
     # print_memory_usage("Ready to Infer")
     return modelmodule
-
-
 def inference_single_file(args, modelmodule):
     """
-    단일 파일 추론 (오디오/비디오 차원 교정 + 데이터 타입 안전 변환)
+    단일 파일 추론 (비디오 단일 입력 지원 + 오디오/비디오 차원 교정)
     """
-    print("Inference 시작")
+    print("🚀 추론 시작...")
+    print_memory_usage("Before Inference")
     
     # Transform 설정
     is_avhubert_audio = True if args.modality == 'audiovisual_avhubert' or (hasattr(args, 'audio_encoder_name') and args.audio_encoder_name == 'av-hubert' and args.modality == 'audio') else False
@@ -218,6 +217,13 @@ def inference_single_file(args, modelmodule):
     batch_data = {}
     rate_ratio = 640
     
+    # ================= [스마트 경로 설정 (핵심 수정)] =================
+    # 비디오 경로만 있고 오디오 경로가 없으면, 비디오에서 오디오를 추출한다고 가정
+    if args.video_path and not args.audio_path:
+        print(f"ℹ️ [INFO] 오디오 경로가 없습니다. 비디오 파일({args.video_path})에서 오디오를 읽습니다.")
+        args.audio_path = args.video_path
+    # =================================================================
+
     if args.modality == "video":
         if not args.video_path: raise ValueError("--video_path required")
         video = load_video(args.video_path)
@@ -229,18 +235,33 @@ def inference_single_file(args, modelmodule):
         batch_data["tokens"] = ""
 
     else:
-        if args.modality in ["audio"] and not args.audio_path: raise ValueError("--audio_path required")
-        if args.modality in ["audiovisual", "audiovisual_avhubert"] and (not args.video_path or not args.audio_path): raise ValueError("Both paths required")
+        # 오디오 모달리티가 포함된 경우 (audio, audiovisual)
+        if not args.audio_path: 
+            raise ValueError("--audio_path (or --video_path for audiovisual) required")
 
+        # 1. 오디오 로드 (비디오 파일을 넣어도 torchaudio가 알아서 소리만 뽑아옴)
         waveform, sample_rate = torchaudio.load(args.audio_path, normalize=True)
-        if sample_rate != 16000: waveform = torchaudio.functional.resample(waveform, sample_rate, 16000)
-        if waveform.shape[0] > 1: waveform = torch.mean(waveform, dim=0, keepdim=True)
+        
+        # 2. 16k 리샘플링
+        if sample_rate != 16000: 
+            waveform = torchaudio.functional.resample(waveform, sample_rate, 16000)
+        
+        # 3. Mono 변환
+        if waveform.shape[0] > 1: 
+            waveform = torch.mean(waveform, dim=0, keepdim=True)
+        
+        # 4. Transpose [Time, 1]
         audio = waveform.transpose(1, 0)
         
+        # 5. 비디오 처리 (Audiovisual일 때)
         if args.modality in ["audiovisual", "audiovisual_avhubert"]:
+            if not args.video_path: raise ValueError("--video_path required for audiovisual")
+            
             video = load_video(args.video_path)
-            audio = cut_or_pad(audio, len(video) * rate_ratio)
+            audio = cut_or_pad(audio, len(video) * rate_ratio) # 길이 맞추기
             video = video_transform(video)
+            
+            # 비디오 채널 차원 추가 [T, H, W] -> [T, 1, H, W]
             if len(video.shape) == 3: video = video.unsqueeze(1)
             
             if hasattr(args, 'downsample_ratio_video') and args.downsample_ratio_video:
@@ -254,10 +275,11 @@ def inference_single_file(args, modelmodule):
         batch_data["audio"] = audio
         batch_data["tokens"] = ""
 
+    # 배치 생성
     batch_list = [batch_data]
     batch = collate_LLM(batch_list, modelmodule.tokenizer, args.modality, is_trainval=False)
     
-    # 차원 수동 교정
+    # 차원 수동 교정 (Squeeze)
     if "audio" in batch:
         audio_tensor = batch["audio"]
         if audio_tensor.dim() == 4 and audio_tensor.shape[1] == 1:
@@ -267,8 +289,9 @@ def inference_single_file(args, modelmodule):
         if video_tensor.dim() == 6 and video_tensor.shape[1] == 1:
             batch["video"] = video_tensor.squeeze(1)
     
+    # GPU 이동 및 타입 변환
     device = next(modelmodule.model.parameters()).device
-    target_dtype = torch.bfloat16
+    target_dtype = torch.bfloat16 if next(modelmodule.model.parameters()).dtype == torch.bfloat16 else torch.float32
 
     for key in batch:
         if isinstance(batch[key], torch.Tensor):
@@ -278,6 +301,7 @@ def inference_single_file(args, modelmodule):
             else:
                 batch[key] = tensor.to(device=device)
     
+    # 추론 실행
     modelmodule.eval()
     if torch.cuda.is_available(): torch.cuda.empty_cache()
     
@@ -286,6 +310,8 @@ def inference_single_file(args, modelmodule):
         generated_text = modelmodule.tokenizer.batch_decode(generated_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
     
     if torch.cuda.is_available(): torch.cuda.empty_cache()
+    print_memory_usage("After Inference")
+    
     return generated_text
 
 def main():
