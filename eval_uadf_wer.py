@@ -5,6 +5,7 @@ import jiwer
 from tqdm import tqdm
 import pandas as pd
 import re
+import contextlib
 
 # 추론 엔진 가져오기
 from inference_avsr import load_model_from_checkpoint, inference_single_file
@@ -13,19 +14,19 @@ def parse_eval_args():
     parser = argparse.ArgumentParser(description="GRID Dataset Evaluation Script")
     
     # === 필수 경로 ===
-    parser.add_argument("--data_dir", type=str, required=True, help="데이터셋 폴더 (tests/ 또는 전체 데이터셋 루트)")
+    parser.add_argument("--data_dir", type=str, required=True, help="데이터셋 루트 폴더 (예: data/)")
     parser.add_argument("--checkpoint", type=str, required=True)
     parser.add_argument("--pretrain_avhubert_enc_video_path", type=str, required=True)
     parser.add_argument("--llm_model", type=str, default="models/Meta-Llama-3.1-8B")
     
-    # === 타겟 스피커 (전체 데이터셋일 때만 사용됨) ===
-    parser.add_argument("--speaker", type=str, default="s1", help="평가할 스피커 폴더명 (예: s1)")
+    # === 타겟 스피커 ===
+    parser.add_argument("--speaker", type=str, default="s1", help="평가할 스피커 폴더명 (예: s10_processed)")
 
     # === 실험 옵션 ===
     parser.add_argument("--use_uadf", action="store_true", help="UADF 사용 여부")
     parser.add_argument("--output_csv", type=str, default="eval_result.csv", help="결과 저장 파일명")
     
-    # === 고정/기본값 ===
+    # === 기본값 설정 ===
     parser.add_argument("--modality", type=str, default="audiovisual")
     parser.add_argument("--video_path", type=str, default=None)
     parser.add_argument("--audio_path", type=str, default=None)
@@ -70,46 +71,49 @@ def get_ground_truth(align_path):
                         words.append(word)
         return " ".join(words).lower()
     except Exception as e:
-        # print(f"⚠️ 정답 파일 읽기 실패 ({align_path}): {e}")
         return ""
+
+def num_to_word(text):
+    mapping = {
+        '0': 'zero', '1': 'one', '2': 'two', '3': 'three', '4': 'four',
+        '5': 'five', '6': 'six', '7': 'seven', '8': 'eight', '9': 'nine'
+    }
+    for k, v in mapping.items():
+        text = text.replace(k, v)
+    return text
 
 def clean_text(text):
     text = text.lower()
-    text = re.sub(r"[^a-z0-9\s]", "", text)
-    return text.strip()
+    text = num_to_word(text)
+    text = re.sub(r"[^a-z\s]", "", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
 
 def main():
     args = parse_eval_args()
     
-    # 1. 모델 로드
-    # print("🚀 모델 로딩 중...")
+    print("🚀 모델 로딩 중...")
     model = load_model_from_checkpoint(args.checkpoint, args)
-    # print("✅ 모델 준비 완료!")
+    print("✅ 모델 준비 완료!")
 
-    # 2. 경로 자동 감지 로직 (핵심 수정!)
-    target_speaker = args.speaker
+    # ================= [경로 설정 수정됨] =================
+    target_speaker_folder = args.speaker # 예: s10_processed
     
-    # (A) 전체 데이터셋 구조인지 확인 (s1 폴더가 있는지)
-    full_structure_path = os.path.join(args.data_dir, target_speaker)
+    # 1. 스피커 폴더 경로 (예: data/s10_processed)
+    video_dir = os.path.join(args.data_dir, target_speaker_folder)
     
-    if os.path.exists(full_structure_path) and os.path.isdir(full_structure_path):
-        print(f"📂 전체 데이터셋 구조 감지 (Target: {target_speaker})")
-        video_dir = full_structure_path
-        audio_dir = os.path.join(args.data_dir, "audio", target_speaker)
-        align_dir = os.path.join(args.data_dir, "alignments", target_speaker)
-    else:
-        # (B) 테스트 폴더 구조 (파일들이 data_dir에 바로 있음)
-        # print(f"📂 단일(Flat) 폴더 구조 감지 (Target: {args.data_dir})")
-        video_dir = args.data_dir
-        audio_dir = args.data_dir
-        align_dir = args.data_dir
+    # 2. 정답 파일 폴더 경로 (예: data/s10_processed/align)
+    align_dir = os.path.join(video_dir, "align")
 
-    # 경로 유효성 최종 확인
     if not os.path.exists(video_dir):
-        print(f"❌ 폴더를 찾을 수 없습니다: {video_dir}")
+        print(f"❌ 스피커 폴더를 찾을 수 없습니다: {video_dir}")
         return
+    if not os.path.exists(align_dir):
+        print(f"❌ 정답(align) 폴더를 찾을 수 없습니다: {align_dir}")
+        return
+    # ======================================================
 
-    # 3. 평가 루프
+    # 비디오 파일 목록 수집
     video_files = [f for f in os.listdir(video_dir) if f.endswith('.mpg') or f.endswith('.mp4')]
     video_files.sort()
     
@@ -117,57 +121,59 @@ def main():
     total_wer = 0
     count = 0
 
-    print(f"▶️ 총 {len(video_files)}개 파일 평가 시작 (UADF: {args.use_uadf})")
+    print(f"[INFO] Processing {len(video_files)} files in '{target_speaker_folder}'...")
 
-    for vid_file in tqdm(video_files):
+    for vid_file in tqdm(video_files, desc="Evaluating", unit="file"):
         file_id = os.path.splitext(vid_file)[0]
         
+        # 경로 조합
         video_path = os.path.join(video_dir, vid_file)
-        audio_path = os.path.join(audio_dir, file_id + ".wav")
+        
+        # 정답 파일 찾기 (align 폴더 안에서 찾음)
         align_path = os.path.join(align_dir, file_id + ".align")
         
-        if not os.path.exists(audio_path): continue
+        # 정답 파일 없으면 스킵
         if not os.path.exists(align_path): continue
-            
+        
         ground_truth = get_ground_truth(align_path)
         if not ground_truth: continue
 
+        # [핵심] 비디오 경로를 오디오 경로로도 사용 (inference_avsr가 알아서 처리함)
         args.video_path = video_path
-        args.audio_path = audio_path 
+        args.audio_path = video_path 
         
         try:
-            prediction = inference_single_file(args, model).lower().strip()
+            with contextlib.redirect_stdout(open(os.devnull, 'w')):
+                prediction = inference_single_file(args, model).lower().strip()
+            
             ground_truth_clean = clean_text(ground_truth)
             prediction_clean = clean_text(prediction)
             
             wer = jiwer.wer(ground_truth_clean, prediction_clean)
-            
-            results.append({
-                "file": file_id,
-                "ground_truth": ground_truth_clean,
-                "prediction": prediction_clean,
-                "wer": wer
-            })
+            results.append({"file": file_id, "gt": ground_truth_clean, "pred": prediction_clean, "wer": wer})
             
             total_wer += wer
             count += 1
             
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            
         except Exception as e:
-            print(f"❌ Error: {e}")
+            print(f"\n[WARN] Failed on {file_id}: {e}")
 
     if count > 0:
         avg_wer = total_wer / count
-        print(f"\n{'='*40}")
-        print(f"📊 최종 평가 결과 (UADF: {args.use_uadf})")
-        print(f"   - 파일 수: {count}")
-        print(f"   - 평균 WER: {avg_wer:.4f} ({avg_wer*100:.2f}%)")
-        print(f"{'='*40}")
+        print("\n" + "="*40)
+        print(f"[SUMMARY] Speaker: {target_speaker_folder} | UADF: {args.use_uadf}")
+        print(f"[SUMMARY] Count: {count}")
+        print(f"[SUMMARY] Avg WER: {avg_wer:.4f} ({avg_wer*100:.2f}%)")
+        print("="*40 + "\n")
         
         df = pd.DataFrame(results)
         df.to_csv(args.output_csv, index=False)
-        print(f"💾 결과 저장됨: {args.output_csv}")
+        print(f"[INFO] Report saved to {args.output_csv}")
     else:
-        print("⚠️ 평가할 데이터가 없습니다.")
+        print("[WARN] No valid data processed.")
 
 if __name__ == "__main__":
     main()
